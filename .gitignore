@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+venv/
+env/
+.venv
+*.log
+uploads/*
+outputs/*
+!uploads/.gitkeep
+!outputs/.gitkeep
+users.txt
+suppliers_config.json
+
+# Локальные данные контейнера
+data/*
+!data/.gitkeep

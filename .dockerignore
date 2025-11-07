@@ -1,0 +1,24 @@
+# Загрузки пользователей
+uploads/
+*.xls
+*.xlsx
+
+# Результаты
+outputs/
+*.xls
+*.xlsx
+
+# Конфигурация
+.env
+suppliers_config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Docker
+*.log
+
