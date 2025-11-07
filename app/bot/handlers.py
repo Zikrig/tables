@@ -1395,6 +1395,10 @@ async def process_preorders_file(message: Message, state: FSMContext):
     
     await message.answer("⏳ Обрабатываю файлы и генерирую заказ...")
     
+    # Сохраняем пути к временным файлам, чтобы удалить их после использования
+    warehouse_tmp_path = data.get('warehouse_file')
+    preorders_tmp_path = data.get('preorders_file')
+
     try:
         # Генерируем заказ (берём свежую конфигурацию поставщика)
         supplier_name = data['supplier']
@@ -1472,3 +1476,15 @@ async def process_preorders_file(message: Message, state: FSMContext):
         logger.error(f"Ошибка при генерации заказа: {e}", exc_info=True)
         await message.answer(f"❌ Ошибка при генерации заказа: {str(e)}")
         await state.clear()
+    finally:
+        # Удаляем загруженные временные файлы: склад и предзаказы
+        try:
+            if warehouse_tmp_path and os.path.exists(warehouse_tmp_path):
+                os.remove(warehouse_tmp_path)
+        except Exception:
+            pass
+        try:
+            if preorders_tmp_path and os.path.exists(preorders_tmp_path):
+                os.remove(preorders_tmp_path)
+        except Exception:
+            pass
