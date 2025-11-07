@@ -369,14 +369,14 @@ async def process_configuring_price_file(message: Message, state: FSMContext):
             },
             'warehouse_order': {
                 'article_col': 0,
-                'quantity_col': 9,
-                'start_row': 2,
+                'quantity_col': 4,
+                'start_row': 1,
             },
             'preorders': {
                 'article_col': 2,
                 'article_col2': 5,
                 'quantity_col': 4,
-                'start_row': 2,
+                'start_row': 1,
             },
             'price_file': str(price_source_path),
             'price_template': str(tmp_path)
@@ -1416,6 +1416,32 @@ async def process_preorders_file(message: Message, state: FSMContext):
             preorders_config=preorders_config,
             price_template=config.get('price_template')
         )
+        # Если ничего не найдено по складу — отправим предпросмотр для диагностики
+        if quantities and sum(quantities.values()) == 0:
+            # ничего не зашло во вход (защита от деления на 0 ниже)
+            pass
+        warehouse_diag = getattr(generator, 'last_diagnostics', {}).get('warehouse') or {}
+        if not quantities or len(quantities) == 0 or warehouse_diag.get('total_items_found', 0) == 0:
+            try:
+                # предпросмотр только первых 10 строк первого листа
+                # Файл 'на склад' повторяет структуру прайса -> используем разметку прайса
+                article_col = price_config.get('article_col', 0)
+                quantity_col = price_config.get('quantity_col', 9)
+                preview = generator.preview_warehouse(data['warehouse_file'], article_col, quantity_col, rows=10)
+                # краткая сводка
+                if warehouse_diag:
+                    summary = (
+                        f"Строк просмотрено: {warehouse_diag.get('rows_seen', '?')}, "
+                        f"артикулов: {warehouse_diag.get('articles_seen', '?')}, "
+                        f"кол-во>0: {warehouse_diag.get('valid_qty_rows', '?')}, "
+                        f"итемов: {warehouse_diag.get('total_items_found', 0)}"
+                    )
+                else:
+                    summary = "(нет метрик)"
+                await message.answer("🔎 Диагностика файла 'Заказ на склад':\n" + summary + "\n\n" + preview[:3500])
+            except Exception as _:
+                # молча игнорируем предпросмотр, чтобы не прерывать сценарий
+                pass
         
         # Отправляем результат
         result_file = FSInputFile(str(output_file))

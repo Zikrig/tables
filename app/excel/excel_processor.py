@@ -10,18 +10,12 @@ ET.register_namespace('', 'http://schemas.openxmlformats.org/spreadsheetml/2006/
 
 try:
     from openpyxl import load_workbook, Workbook
+    from openpyxl.utils import column_index_from_string
     OPENPYXL_AVAILABLE = True
 except ImportError:
     OPENPYXL_AVAILABLE = False
 
-# Debug snapshots base directory (can be overridden by env var)
-DEBUG_SNAPSHOTS_DIR = os.environ.get("DEBUG_SNAPSHOTS_DIR", os.path.join("test", "res"))
-DEBUG_SNAPSHOTS_VERBOSE = os.environ.get("DEBUG_SNAPSHOTS_VERBOSE", "0") == "1"
-try:
-    os.makedirs(DEBUG_SNAPSHOTS_DIR, exist_ok=True)
-except Exception:
-    # Best effort; actual writes will try again and log errors
-    pass
+ 
 
 class ExcelProcessor:
     def __init__(self, file_path: str):
@@ -57,30 +51,13 @@ class ExcelProcessor:
                    total_row: int = None, total_count_enabled: bool = True):
         source_file = self.file_path
         is_xlsx_source = source_file.lower().endswith('.xlsx')
-        # Debug snapshots
-        debug_dir = DEBUG_SNAPSHOTS_DIR
-        try:
-            os.makedirs(debug_dir, exist_ok=True)
-        except Exception:
-            pass
         base_name = os.path.splitext(os.path.basename(output_path))[0]
 
         if not (is_xlsx_source and OPENPYXL_AVAILABLE):
             raise RuntimeError("Поддерживается только формат .xlsx")
         if is_xlsx_source and OPENPYXL_AVAILABLE:
-            def debug_copy(label: str):
-                debug_path = os.path.join(debug_dir, f"{base_name}_{label}.xlsx")
-                try:
-                    shutil.copy2(output_path, debug_path)
-                except Exception as e:
-                    try:
-                        with open(os.path.join(debug_dir, f"{base_name}_{label}.log"), "a", encoding="utf-8") as f:
-                            f.write(f"[copy xlsx error] {e}\n")
-                    except Exception:
-                        pass
             # 1) Точная копия исходного файла
             shutil.copy2(source_file, output_path)
-            debug_copy("00_copied")
             # 2) Считаем список обновлений ячеек (A1 -> значение)
             updates: Dict[str, float] = {}
             def idx_to_col(col_index_zero_based: int) -> str:
@@ -99,9 +76,11 @@ class ExcelProcessor:
                     continue
                 article = None
                 if row_data and len(row_data) > article_col and row_data[article_col]:
-                    article = str(row_data[article_col]).strip()
-                if article and article in quantities:
-                    qty = float(quantities[article])
+                    article = _normalize_article(row_data[article_col])
+                # Use normalized keys for lookup
+                norm_quantities: Dict[str, float] = { _normalize_article(k): v for k, v in quantities.items() if _normalize_article(k) }
+                if article and article in norm_quantities:
+                    qty = float(norm_quantities[article])
                     if qty > 0:
                         updates[rc_to_a1(row_idx, quantity_col)] = qty
                         total_quantity += qty
@@ -127,8 +106,7 @@ class ExcelProcessor:
             for a1_ref, number in updates.items():
                 ws[a1_ref].value = number
             wb.save(output_path)
-            # 4) Финальный снимок
-            debug_copy("final")
+            # 4) Готово
 
     def close(self) -> None:
         """Совместимость: закрытие ресурсов (ничего не делает)."""
@@ -146,6 +124,181 @@ def convert_to_xlsx(input_path: str, output_path: str) -> str:
 
 def _ns() -> Dict[str, str]:
     return {'a': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+
+def _to_plain_string(value) -> str:
+    # Extract plain text from rich text objects if present; fall back to str(value)
+    try:
+        # openpyxl rich text may have 'runs' iterable of text blocks
+        if hasattr(value, 'runs'):
+            try:
+                return "".join(getattr(r, 'text', str(r)) for r in value.runs)
+            except Exception:
+                pass
+        # Many objects expose .text
+        if hasattr(value, 'text'):
+            t = getattr(value, 'text')
+            if t is not None:
+                return str(t)
+    except Exception:
+        pass
+    return str(value)
+
+def _normalize_article(value) -> str:
+    if value is None:
+        return ""
+    s = _to_plain_string(value)
+    # normalize spaces (incl. NBSP/thin NBSP), strip, then remove all whitespace
+    s = s.replace('\u00A0', ' ').replace('\u202F', ' ')
+    s = s.strip()
+    if not s:
+        return ""
+    # Remove all whitespace to avoid formatting mismatches and unify case
+    s = "".join(ch for ch in s if not ch.isspace())
+    return s
+
+def normalize_article(value) -> str:
+    return _normalize_article(value)
+
+def _coerce_float(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return None
+    s = str(value)
+    # normalize non-breaking spaces and thin spaces
+    s = s.replace('\u00A0', ' ').replace('\u202F', ' ')
+    s = s.strip()
+    if not s:
+        return None
+    # If both ',' and '.' present, the last one is decimal; remove others
+    last_comma = s.rfind(',')
+    last_dot = s.rfind('.')
+    try:
+        if last_comma == -1 and last_dot == -1:
+            # No explicit decimal separator: remove spaces and parse
+            s2 = s.replace(' ', '')
+            return float(s2)
+        if last_comma > last_dot:
+            # Comma as decimal
+            s2 = s.replace('.', '')
+            s2 = s2.replace(' ', '')
+            s2 = s2.replace(',', '.')
+            return float(s2)
+        else:
+            # Dot as decimal
+            s2 = s.replace(',', '')
+            s2 = s2.replace(' ', '')
+            return float(s2)
+    except ValueError:
+        return None
+
+def collect_article_quantities_xlsx(file_path: str, sheet_index: int, article_col_letter: str, quantity_col_letter: str, max_rows: int = 1000, start_row: int = 2) -> Dict[str, float]:
+    if not (file_path.lower().endswith('.xlsx') and OPENPYXL_AVAILABLE):
+        raise RuntimeError("Поддерживается только формат .xlsx")
+    wb = load_workbook(file_path, data_only=True)
+    try:
+        ws = wb.worksheets[sheet_index]
+        result: Dict[str, float] = {}
+        max_row = min(ws.max_row or 0, max_rows)
+        a_col = column_index_from_string(article_col_letter)
+        q_col = column_index_from_string(quantity_col_letter)
+        # start_row is 1-based (2 means skip header)
+        start_r = max(1, start_row)
+        for r in range(start_r, max_row + 1):
+            art_raw = ws.cell(r, a_col).value
+            qty_raw = ws.cell(r, q_col).value
+            article = _normalize_article(art_raw)
+            if not article:
+                continue
+            qty = _coerce_float(qty_raw)
+            if qty is None:
+                continue
+            if qty == 0:
+                continue
+            prev = result.get(article, 0.0)
+            result[article] = prev + float(qty)
+        return result
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+def get_warehouse_articles(file_path: str, sheet_index: int = 0, max_rows: int = 1000, start_row: int = 2) -> Dict[str, float]:
+    return collect_article_quantities_xlsx(file_path, sheet_index, 'A', 'E', max_rows, start_row)
+
+def get_preorder_articles(file_path: str, sheet_index: int = 0, max_rows: int = 1000, start_row: int = 2) -> Dict[str, float]:
+    return collect_article_quantities_xlsx(file_path, sheet_index, 'C', 'E', max_rows, start_row)
+
+def collect_article_quantities_xlsx_all_sheets(file_path: str, article_col_letter: str, quantity_col_letter: str, max_rows: int = 1000, start_row: int = 2) -> Dict[str, float]:
+    if not (file_path.lower().endswith('.xlsx') and OPENPYXL_AVAILABLE):
+        raise RuntimeError("Поддерживается только формат .xlsx")
+    wb = load_workbook(file_path, data_only=True)
+    try:
+        result: Dict[str, float] = {}
+        a_col = column_index_from_string(article_col_letter)
+        q_col = column_index_from_string(quantity_col_letter)
+        start_r = max(1, start_row)
+        for ws in wb.worksheets:
+            max_row = min(ws.max_row or 0, max_rows)
+            for r in range(start_r, max_row + 1):
+                art_raw = ws.cell(r, a_col).value
+                qty_raw = ws.cell(r, q_col).value
+                article = _normalize_article(art_raw)
+                if not article:
+                    continue
+                qty = _coerce_float(qty_raw)
+                if qty is None or qty == 0:
+                    continue
+                prev = result.get(article, 0.0)
+                result[article] = prev + float(qty)
+        return result
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+def get_warehouse_articles_all_sheets(file_path: str, max_rows: int = 1000, start_row: int = 2) -> Dict[str, float]:
+    return collect_article_quantities_xlsx_all_sheets(file_path, 'A', 'E', max_rows, start_row)
+
+def get_preorder_articles_all_sheets(file_path: str, max_rows: int = 1000, start_row: int = 2) -> Dict[str, float]:
+    return collect_article_quantities_xlsx_all_sheets(file_path, 'C', 'E', max_rows, start_row)
+
+def _print_articles_with_sheet_all_sheets(file_path: str, article_col_letter: str, quantity_col_letter: str, max_rows: int = 1000, start_row: int = 2) -> None:
+    if not (file_path.lower().endswith('.xlsx') and OPENPYXL_AVAILABLE):
+        raise RuntimeError("Поддерживается только формат .xlsx")
+    wb = load_workbook(file_path, data_only=True)
+    try:
+        a_col = column_index_from_string(article_col_letter)
+        q_col = column_index_from_string(quantity_col_letter)
+        start_r = max(1, start_row)
+        for ws in wb.worksheets:
+            max_row = min(ws.max_row or 0, max_rows)
+            for r in range(start_r, max_row + 1):
+                art_raw = ws.cell(r, a_col).value
+                qty_raw = ws.cell(r, q_col).value
+                article = _normalize_article(art_raw)
+                if not article:
+                    continue
+                qty = _coerce_float(qty_raw)
+                if qty is None or qty == 0:
+                    continue
+                print(f"{article}\t{ws.title}")
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+def print_warehouse_articles_with_sheets(file_path: str, max_rows: int = 1000, start_row: int = 2) -> None:
+    _print_articles_with_sheet_all_sheets(file_path, 'A', 'E', max_rows, start_row)
+
+def print_preorder_articles_with_sheets(file_path: str, max_rows: int = 1000, start_row: int = 2) -> None:
+    _print_articles_with_sheet_all_sheets(file_path, 'C', 'E', max_rows, start_row)
 
 def _col_row_from_a1(a1: str) -> (str, int):
     i = 0
